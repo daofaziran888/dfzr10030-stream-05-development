@@ -10,10 +10,11 @@ from datetime import datetime
 from typing import Any
 
 from app.fixtures import (
-    SOURCE_EVENTS, TRANSFORM_RECORDS, WINDOW_CONFIGS,
+    SOURCE_EVENTS, WINDOW_CONFIGS,
     RULE_TRIGGERS, METRIC_DEFS, QUALITY_SAMPLES,
     PARTITION_STATS, EVENT_ROUTES,
 )
+from app.services.order_transform import service as order_transform_service
 from app.store import store
 
 
@@ -62,45 +63,81 @@ def run_source_cdc_pipeline() -> dict:
 
 # Pipeline 2: stream_transform -> window_agg -> metric_calc
 def run_window_metric_pipeline(window_id: str | None = None) -> dict:
-    """执行窗口聚合并计算指标。"""
-    records = list(TRANSFORM_RECORDS)
+    """执行窗口聚合并计算指标。
+
+    只从持久化的订单转换批次里取「已发布」记录；隔离和待确认的行不计入出数，
+    但会在结果里以未到账口径单独标出。
+    """
     configs = WINDOW_CONFIGS
     if window_id:
         configs = [c for c in configs if c["窗口编号"] == window_id]
 
-    results: dict[str, Any] = {"total_records": len(records)}
-    for cfg in configs:
-        gmv = sum(_to_float(r["金额"]) for r in records)
-        cnt = len(records)
-        users = set(r["用户ID"] for r in records)
-        channel_dist: dict[str, int] = {}
-        for r in records:
-            channel_dist[r["渠道"]] = channel_dist.get(r["渠道"], 0) + 1
+    window_batches = {
+        str(row.get("window_no", ""))
+        for row in store.rows("order_transform_batch")
+    }
+    known_windows = {str(cfg["窗口编号"]) for cfg in WINDOW_CONFIGS}
+    missing = sorted(name for name in window_batches if name and name not in known_windows)
+    if missing:
+        configs = list(configs) + [
+            {"窗口编号": name, "窗口类型": "滚动窗口", "窗口长度秒": 60, "滑动步长秒": 60,
+             "迟到阈值秒": 5, "水位类型": "event_time", "水位延迟秒": 3}
+            for name in missing
+        ]
 
-        results[cfg["窗口编号"]] = {
-            "窗口类型": cfg["窗口类型"], "记录数": cnt,
-            "gmv": round(gmv, 2), "独立用户": len(users),
-            "平均订单": round(gmv / cnt, 2) if cnt else 0.0,
-            "渠道分布": channel_dist,
+    snapshots = {
+        str(cfg["窗口编号"]): order_transform_service.window_snapshot(str(cfg["窗口编号"]))
+        for cfg in configs
+    }
+    published_total = sum(snapshot["published"]["count"] for snapshot in snapshots.values())
+    results: dict[str, Any] = {
+        "total_records": published_total,
+        "published_total": published_total,
+        "pending_total": sum(snapshot["pending"]["count"] for snapshot in snapshots.values()),
+        "source_batch_count": len(store.rows("order_transform_batch")),
+    }
+    for cfg in configs:
+        window_no = str(cfg["窗口编号"])
+        snapshot = snapshots[window_no]
+        results[window_no] = {
+            "窗口类型": cfg["窗口类型"],
+            "记录数": snapshot["published"]["count"],
+            "gmv": snapshot["published"]["amount"],
+            "独立用户": snapshot["published"]["user_count"],
+            "平均订单": round(snapshot["published"]["amount"] / snapshot["published"]["count"], 2)
+            if snapshot["published"]["count"] else 0.0,
+            "未到账笔数": snapshot["pending"]["count"],
+            "未到账范围": snapshot["pending"]["range"],
+            "已入账笔数": snapshot["settled"]["count"],
+            "渠道分布": _channel_distribution(window_no),
         }
 
-    # 聚合指标
+    # 聚合指标：口径与窗口一致，只统计已发布记录
+    published_rows = order_transform_service.published_records()
     metrics = {}
     for m in METRIC_DEFS:
         mid = m["指标编号"]
-        if "count" in m["计算公式"]:
-            metrics[mid] = len(records)
+        if "count" in m["计算公式"] and "distinct" not in m["计算公式"]:
+            metrics[mid] = len(published_rows)
         elif "sum" in m["计算公式"]:
-            metrics[mid] = round(sum(_to_float(r["金额"]) for r in records), 2)
+            metrics[mid] = round(sum(_to_float(r.get("amount")) for r in published_rows), 2)
         elif "avg" in m["计算公式"]:
-            vals = [_to_float(r["金额"]) for r in records]
+            vals = [_to_float(r.get("amount")) for r in published_rows]
             metrics[mid] = round(statistics.mean(vals), 2) if vals else 0.0
         elif "distinct" in m["计算公式"]:
-            metrics[mid] = len(set(r["用户ID"] for r in records))
+            metrics[mid] = len({r.get("user_id") for r in published_rows})
 
     results["metrics"] = metrics
     _wr("window_metric_calc", {"source": ["stream_transform", "window_agg"], "target": "metric_calc", "payload": results})
     return results
+
+
+def _channel_distribution(window_no: str) -> dict[str, int]:
+    dist: dict[str, int] = {}
+    for record in order_transform_service.published_records(window_no):
+        channel = str(record.get("channel") or "未知")
+        dist[channel] = dist.get(channel, 0) + 1
+    return dist
 
 
 # Pipeline 3: rule_engine -> event_router -> pipeline_orch

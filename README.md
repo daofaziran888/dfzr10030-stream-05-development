@@ -51,8 +51,8 @@ npm run dev
 | --- | --- | --- | --- |
 | 源端绑定 | `source_binding` | 数据源端 | 源端编号、源端类型、连接地址 |
 | 变更捕获 | `cdc_task` | CDC任务 | 任务编号、源数据库、监控表 |
-| 流式转换 | `stream_transform` | 转换算子 | 算子编号、输入流、输出流 |
-| 窗口聚合 | `window_agg` | 时间窗口 | 窗口编号、聚合指标、窗口类型 |
+| 流式转换 | `stream_transform` | 转换算子 / 订单转换批次 | 算子编号、输入流、输出流；批次号、源订单编号、发布状态 |
+| 窗口聚合 | `window_agg` | 时间窗口 / 窗口入账 | 窗口编号、聚合指标、窗口类型；已发布笔数、未到账范围 |
 | 状态管理 | `state_store` | 算子状态 | 状态编号、关联算子、存储后端 |
 | 规则引擎 | `rule_engine` | 业务规则 | 规则编号、规则条件、触发动作 |
 | 水位管理 | `watermark_mgr` | 事件水位 | 水位编号、关联流、水位类型 |
@@ -74,6 +74,23 @@ npm run dev
   `backend/app/routers/<模块>.py`，业务规则在 `backend/app/services/<模块>.py`。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 订单转换批次与窗口入账
+
+窗口聚合和指标计算不再直接读固定样本，而是从持久化的订单转换批次取数：
+
+- `POST /api/order_transform/batches`（流式转换页「发布订单批次」）接收一批新订单。
+  每行先以原始值落进 `order_transform_record`，再按金额、事件时间、用户字段校验。
+  金额非法、缺失或不大于 0 的行不会被当作 0 元；时间缺时区或无法解析的行不会被当作
+  当前时间，这两类行统一进入隔离区并保留原始值、源订单编号和批次号。
+- `POST /api/order_transform/batches/{batch_no}/retry` 用于落库失败后的续跑：从转换批
+  找回坏行原始值，只确认仍待处理的行，已发布订单不会重复。
+- `POST /api/order_transform/batches/{batch_no}/records/{source_order_id}` 修正隔离行，
+  修正值与原始值分开保存；重新提交同一源订单时若原记录尚未发布，会就地重新校验。
+- `GET /api/order_transform/windows/{window_no}` 只对已发布记录汇总，并返回未到账笔数、
+  订单范围和已发布未入账数量；`POST .../settle` 表示窗口实际入账，回写核对清单。
+- `GET /api/order_transform/orders/{source_order_id}` 按源订单编号回查，刷新或重新进入
+  窗口后仍返回已提交批次中的同一条记录。
 
 领域：数据工程
 子方向：数仓与数据湖

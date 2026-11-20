@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import ROUTERS
+from app.routers import ALIAS_ROUTERS, ROUTERS
 from app.routers.pipeline import router as pipeline_router
 from app.store import store
 
@@ -25,6 +25,8 @@ app.add_middleware(
 
 for module in ROUTERS:
     app.include_router(module.router)
+for module in ALIAS_ROUTERS:
+    app.include_router(module)
 app.include_router(pipeline_router)
 
 

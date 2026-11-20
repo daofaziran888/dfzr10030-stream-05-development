@@ -653,3 +653,67 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '再平衡触发': '分组分区样例3',
   '左右迁移': '分组分区样例3'}]
 }
+
+
+# ---------------------------------------------------------------------------
+# 订单转换批次基线：示例订单在初始化时就作为一条「已发布」转换批次落库，
+# 窗口聚合与指标计算都只从这条持久化批次取数，不再直接读固定样本。
+# ---------------------------------------------------------------------------
+def _bootstrap_order_batches() -> None:
+    from app.fixtures import TRANSFORM_RECORDS
+
+    batch_no = "OTB-20261116-0001"
+    window_no = "WIN-TUMBLE-60s"
+    SEED_ROWS["order_transform_batch"] = [{
+        "id": 1,
+        "batch_no": batch_no,
+        "window_no": window_no,
+        "source": "stream_transform",
+        "status": "已发布",
+        "remark": "示例订单基线批次",
+        "idempotency_key": "seed-baseline",
+        "received_count": len(TRANSFORM_RECORDS),
+        "duplicate_count": 0,
+        "duplicates": [],
+        "submitted_at": "2026-11-16T08:10:05+00:00",
+        "confirmed_at": "2026-11-16T08:10:05+00:00",
+        "settled_at": None,
+        "pending": False,
+        "abnormal": False,
+    }]
+    SEED_ROWS["order_transform_record"] = [
+        {
+            "id": index,
+            "batch_id": 1,
+            "batch_no": batch_no,
+            "row_no": index,
+            "source_order_id": order["订单编号"],
+            "raw_amount": order["金额"],
+            "raw_event_time": order["event_time"],
+            "raw_user_id": order["用户ID"],
+            "corrected_amount": None,
+            "corrected_event_time": None,
+            "corrected_user_id": None,
+            "amount": order["金额"],
+            "event_time": order["event_time"],
+            "user_id": order["用户ID"],
+            "status": "已发布",
+            "reject_fields": [],
+            "reject_reason": "",
+            "corrected": False,
+            "corrected_at": None,
+            "window_no": window_no,
+            "channel": order["渠道"],
+            "region": order["地区"],
+            "published_at": "2026-11-16T08:10:05+00:00",
+            "booked": False,
+            "booked_at": None,
+            "booking_window_no": None,
+            "pending": False,
+            "abnormal": False,
+        }
+        for index, order in enumerate(TRANSFORM_RECORDS, start=1)
+    ]
+
+
+_bootstrap_order_batches()

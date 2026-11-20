@@ -27,6 +27,50 @@
       <button class="btn ghost" data-testid="reset" type="button" @click="resetFilters">重置条件</button>
     </form>
 
+    <section class="batch-panel" data-testid="window-settlement">
+      <header class="batch-head">
+        <div>
+          <h3>窗口实际入账</h3>
+          <p class="page-desc">窗口只对已发布的转换批次记录出数；隔离与待确认的订单单独列为未到账范围，实际入账后回写转换核对清单。</p>
+        </div>
+        <div class="batch-publish">
+          <label class="create-field"><span>窗口编号</span><input v-model="windowNo" data-testid="settle-window" @change="loadSettlement" /></label>
+          <button class="btn" type="button" data-testid="load-settlement" @click="loadSettlement">刷新出数</button>
+          <button class="btn primary" type="button" data-testid="settle-window-action" :disabled="settling" @click="settleWindow">
+            {{ settling ? '入账中…' : '确认实际入账' }}
+          </button>
+        </div>
+      </header>
+      <p v-if="settleMessage" class="batch-message" :class="{ 'error-text': settleFailed }" data-testid="settle-message">{{ settleMessage }}</p>
+      <div v-if="settlement" class="stat-row">
+        <article class="stat-card"><span class="stat-label">已发布笔数</span><strong class="stat-value" data-testid="published-count">{{ settlement.published.count }}</strong></article>
+        <article class="stat-card"><span class="stat-label">已发布金额</span><strong class="stat-value" data-testid="published-amount">{{ settlement.published.amount }}</strong></article>
+        <article class="stat-card"><span class="stat-label">已入账笔数</span><strong class="stat-value" data-testid="settled-count">{{ settlement.settled.count }}</strong></article>
+        <article class="stat-card"><span class="stat-label">未到账笔数</span><strong class="stat-value" data-testid="pending-count">{{ settlement.pending.count }}</strong></article>
+      </div>
+      <p v-if="settlement" class="page-desc" data-testid="pending-range">
+        未到账范围：{{ settlement.pending.range ? `${settlement.pending.range.from} ~ ${settlement.pending.range.to}` : '暂无待确认记录' }}
+        <span v-if="settlement.pending.order_ids.length">（{{ settlement.pending.order_ids.join('、') }}）</span>
+        · 已发布但未入账：{{ settlement.pending.unbooked_published }}
+      </p>
+      <table v-if="settlement" class="data-table">
+        <thead>
+          <tr><th>源订单编号</th><th>批次号</th><th>状态</th><th>核对状态</th><th>金额</th><th>事件时间</th><th>入账时间</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="record in settlement.checklist" :key="record.source_order_id || record.row_no" :data-testid="`checklist-${record.source_order_id}`" :data-status="record['核对状态']">
+            <td>{{ record.source_order_id || '（缺源单号）' }}</td>
+            <td>{{ record.batch_no }}</td>
+            <td>{{ record.status }}</td>
+            <td>{{ record['核对状态'] }}</td>
+            <td>{{ record.amount ?? '—' }}</td>
+            <td>{{ record.event_time ?? record.raw_event_time ?? '—' }}</td>
+            <td>{{ record.booked_at ?? '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
     <table class="data-table">
       <thead>
         <tr>
@@ -168,8 +212,46 @@ async function runAction(action: string, row: Row) {
   }
 }
 
-async function reload() {
-  errorMessage.value = ''
+// ---- 窗口实际入账：只对已发布批次出数，入账后回写核对清单 ----
+const SETTLE_ENDPOINT = '/api/order_transform'
+const windowNo = ref('WIN-TUMBLE-60s')
+const settlement = ref<any>(null)
+const settleMessage = ref('')
+const settleFailed = ref(false)
+const settling = ref(false)
+
+async function loadSettlement() {
+  settleMessage.value = ''
+  settleFailed.value = false
+  try {
+    const res = await request(`${SETTLE_ENDPOINT}/windows/${encodeURIComponent(windowNo.value)}`)
+    if (!res.ok) throw new Error('窗口出数读取失败')
+    settlement.value = await res.json()
+  } catch (error) {
+    settlement.value = null
+    settleMessage.value = error instanceof Error ? error.message : '窗口出数读取失败'
+    settleFailed.value = true
+  }
+}
+
+async function settleWindow() {
+  settling.value = true
+  try {
+    const res = await request(`${SETTLE_ENDPOINT}/windows/${encodeURIComponent(windowNo.value)}/settle`, { method: 'POST', body: '{}' })
+    const payload = await res.json()
+    settleMessage.value = payload.message || ''
+    settleFailed.value = !payload.ok
+    if (payload.entry) settlement.value = payload.entry
+    else await loadSettlement()
+  } catch (error) {
+    settleMessage.value = error instanceof Error ? error.message : '入账失败'
+    settleFailed.value = true
+  } finally {
+    settling.value = false
+  }
+}
+
+async function reload() {  errorMessage.value = ''
   const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
     const response = await request(`${ENDPOINT}?${query}`)
@@ -185,4 +267,5 @@ async function reload() {
 }
 
 onMounted(reload)
+onMounted(loadSettlement)
 </script>
